@@ -51,25 +51,17 @@ offset: 偏移量,offset是数据在分区中的唯一标识,后续消费者组�
 bin/kafka-topics.sh --create --topic topic名称 --partitions 分区数 --replication-factor 副本数 --bootstrap-server borker主机:9092,..
 ```
 
-
-
 ### 	2.1.2  查看kafka集群所有的topic
-
-
 
 ```shell
 bin/kafka-topics.sh --list --bootstrap-server borker主机:9092,..
 ```
-
-
 
 ### 	2.1.3  查看某个topic的详细信息
 
 ```shell
 bin/kafka-topics.sh --describe --topic topic名称 --bootstrap-server borker主机:9092,..
 ```
-
-
 
 ### 	2.1.4  修改topic信息
 
@@ -79,15 +71,11 @@ bin/kafka-topics.sh --describe --topic topic名称 --bootstrap-server borker主�
 bin/kafka-topics.sh --alter --topic topic名称 --bootstrap-server borker主机:9092,.. --partitions 分区数
 ```
 
-
-
 ### 	2.1.5  删除topic
 
 ```shell
 bin/kafka-topics.sh --delete --topic topic名称 --bootstrap-server borker主机:9092,..
 ```
-
-
 
 ## 2.2  消费者/生产者相关	
 
@@ -97,15 +85,11 @@ bin/kafka-topics.sh --delete --topic topic名称 --bootstrap-server borker主机
 bin/kafka-console-consumer.sh --topic topic名称 --bootstrap-server borker主机:9092,..
 ```
 
-
-
 ### 	2.2.2  生产者相关
 
 ```shell
 bin/kafka-console-producer.sh --topic topic名称 --broker-list borker主机:9092,..
 ```
-
-
 
 ### 	2.2.3  数据相关
 
@@ -115,7 +99,11 @@ bin/kafka-dump-log.sh --files 待查看的文件路径 --print-data-log
 
 # 3.原理
 
+
+
 ## 3.1  存储结构
+
+
 
 **Topic:** 逻辑上的概念
 
@@ -142,6 +130,8 @@ bin/kafka-dump-log.sh --files 待查看的文件路径 --print-data-log
 	1.根据segment文件名依据二分查找法,确定offset数据在哪个segment中
 	2.根据segment文件的Index索引确定数据处于log文件哪个区间
 	3.根据log文件扫描区间得到offset数据
+
+
 
 ## 3.2  生产者
 
@@ -288,4 +278,85 @@ sequenceNumber: 序列化号,代表发送到分区的第几条数据
 ​	5.通过分区器得知数据应该发送到哪个分区
 ​	6.将数据发送到共享变量accumulator中,等到该topic 该分区积累一个批次之后由sender线程统一发送到broker中
 5.消费者拉取数据消费完成之后会提交offset,提交的offset = 消费的数据的offset+1
+
+kafka系列-kafka调优篇-高并发高吞吐架构设计
+boat824109722 2017-12-15 16:33:20 7221 收藏 4
+分类专栏： kafka 文章标签： kafka 大数据 并发 消息队列
+版权
+
+ kafka的PageCache读写
+
+ 不同于Redis和MemcacheQ等内存消息队列，Kafka的设计是把所有的Message都要写入速度低容量大的硬盘，以此来换取更强的存储能力。实际上，Kafka使用硬盘并没有带来过多的性能损失（这一点是有条件限制的，这个条件是，消费者的消费速度要高于或等于生产者的速度）。
+
+ 
+
+
+ kafka重度依赖底层操作系统提供的PageCache功能。（文件缓存，速度相当于操作内存）当上层有写操作时，操作系统只是将数据写入PageCache，同时标记Page属性为Dirty。当读操作发生时，先从PageCache中查找，如果发生缺页才进行磁盘调度，最终返回需要的数据。写入PageCache的数据被定期批量保存到文件系统，减少了磁盘的操作次数，减少系统开销。
+
+ 
+
+
+ 实际上PageCache是把尽可能多的空闲内存都当做了磁盘缓存来使用。同时如果有其他进程申请内存，回收PageCache的代价又很小，所以现代的OS都支持PageCache。使用PageCache功能同时可以避免JVM设计带来的GC开销大的问题。
+
+ 
+
+
+ 总结：
+
+ 1、kafka一开始是把数据写到PageCache，也就是缓存，如果消费者一直在消费，而且速度大于等于kafka的生产者发送数据的速度，那么消费者会一直从PageCache读取数据，速度等同于内存的操作，不会因为kafka写入磁盘的操作影响吞吐量。
+
+ 
+
+
+ 2、当kafka的消费者消费速度不及生产者生产速度时，PageCache存的数据已经是最新的数据了，kafka消费端需要的数据已经被存储磁盘中，这时，kafka的消费速度会受到磁盘的读取速度影响。
+
+ 
+
+
+ 问题：
+
+ kafka的数据一开始就是存储在PageCache上的，定期flush到磁盘上的，也就是说，不是每个消息都被存储在磁盘了，如果出现断电或者机器故障等，PageCache上的数据就丢失了。
+
+ 
+
+
+ kafka数据完整性保障：
+
+ kafka是多副本的，当你配置了同步复制之后。多个副本的数据都在PageCache里面，出现多个副本同时挂掉的概率比1个副本挂掉的概率就很小了。（官方推荐是通过副本来保证数据的完整性的）
+
+ 
+
+
+ 同时kafka也提供了相关的配置参数，来让你在性能与可靠性之间权衡（一般默认）：
+
+ #
+ 当达到下面的消息数量时，会将数据
+ flush
+ 到日志文件中。默认
+ 10000
+
+ log.flush.interval.messages=10000
+
+ #
+ 当达到下面的时间
+ (ms)
+ 时，执行一次强制的
+ flush
+ 操作。
+ interval.ms
+ 和
+ interval.messages
+ 无论哪个达到，都会
+ flush
+ 。默认
+ 3000ms
+
+ log.flush.interval.ms=1000
+
+ #
+ 检查是否需要将日志
+ flush
+ 的时间间隔
+
+ log.flush.scheduler.interval.ms = 3000
 
